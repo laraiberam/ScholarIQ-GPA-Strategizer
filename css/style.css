@@ -1,0 +1,38 @@
+/* ==========================================================================
+   ScholarIQ Style System
+   ========================================================================== */
+
+/* --- Global Styles --- */
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #f8fafc;
+}
+
+/* --- Scrollbar Customizations --- */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
+/* --- Forms & Interactive Elements --- */
+.course-item {
+    transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+/* --- Charts --- */
+canvas {
+    max-width: 100%;
+}
