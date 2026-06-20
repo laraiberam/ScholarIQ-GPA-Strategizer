@@ -42,19 +42,48 @@ const DOM = {
 // 1. Initialization & Auth State
 // ==========================================================================
 
+let isOfflineMode = false;
+
+function enterOfflineMode() {
+    if (isOfflineMode) return;
+    isOfflineMode = true;
+    currentUser = { uid: 'offline_user' };
+    DOM.userIdDisplay.textContent = `Offline Mode`;
+    DOM.authLoading.classList.add('hidden');
+    DOM.appContainer.classList.remove('hidden');
+    initData();
+}
+
+// Timeout to enter offline mode if authentication hangs (e.g. 4 seconds)
+const authTimeout = setTimeout(() => {
+    if (!currentUser) {
+        console.warn("Authentication timed out. Entering offline mode...");
+        enterOfflineMode();
+    }
+}, 4000);
+
 onAuthStateChanged(auth, (user) => {
     if (user) {
+        clearTimeout(authTimeout);
         currentUser = user;
         DOM.userIdDisplay.textContent = `ID: ${user.uid.slice(0, 6)}`;
         DOM.authLoading.classList.add('hidden');
         DOM.appContainer.classList.remove('hidden');
         initData();
     } else {
-         if (typeof __initial_auth_token !== 'undefined') {
-             signInWithCustomToken(auth, __initial_auth_token);
-         } else {
-             signInAnonymously(auth);
-         }
+        if (typeof __initial_auth_token !== 'undefined') {
+            signInWithCustomToken(auth, __initial_auth_token).catch(err => {
+                console.error("Firebase custom token auth failed, entering offline mode:", err);
+                clearTimeout(authTimeout);
+                enterOfflineMode();
+            });
+        } else {
+            signInAnonymously(auth).catch(err => {
+                console.error("Firebase anonymous auth failed, entering offline mode:", err);
+                clearTimeout(authTimeout);
+                enterOfflineMode();
+            });
+        }
     }
 });
 
@@ -73,19 +102,24 @@ function initData() {
         console.error("Failed to load from LocalStorage:", err);
     }
 
+    if (isOfflineMode) {
+        console.log("Running in offline mode. Firestore synchronization disabled.");
+        return;
+    }
+
     // Connect to Firestore
-    const q = query(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'semesters'), orderBy('createdAt', 'asc'));
+    const q = query(collection(db, "users", currentUser.uid, "semesters"), orderBy('createdAt', 'asc'));
     onSnapshot(q, (sn) => {
         const remoteData = [];
         sn.forEach((d) => remoteData.push({ id: d.id, ...d.data() }));
-        
+
         // Keep local offline records (id starting with "local_") that don't match any remote record by name
-        const localOnly = semestersData.filter(s => 
+        const localOnly = semestersData.filter(s =>
             s.id && typeof s.id === 'string' && s.id.startsWith("local_") && !remoteData.some(r => r.name === s.name)
         );
-        
+
         semestersData = [...remoteData, ...localOnly];
-        
+
         // Sort chronologically by createdAt (supports both Firestore Timestamps and local ISO strings)
         const getTime = (val) => {
             if (!val) return 0;
@@ -93,9 +127,9 @@ function initData() {
             if (val.seconds) return val.seconds * 1000;
             return new Date(val).getTime() || 0;
         };
-        
+
         semestersData.sort((a, b) => getTime(a.createdAt) - getTime(b.createdAt));
-        
+
         // Keep LocalStorage in sync
         try {
             localStorage.setItem(`semesters_${currentUser.uid}`, JSON.stringify(semestersData));
@@ -129,10 +163,10 @@ DOM.calculateGoalBtn.addEventListener('click', () => {
 DOM.semesterForm.onsubmit = async (e) => {
     e.preventDefault();
     console.log("Save process started");
-    
+
     const submitBtn = e.target.querySelector('button[type="submit"]');
     const originalText = submitBtn.innerHTML;
-    
+
     try {
         // Set loading UI state
         submitBtn.disabled = true;
@@ -198,26 +232,34 @@ DOM.semesterForm.onsubmit = async (e) => {
         }
 
         console.log("Semester data prepared");
-        console.log("Saving to database");
-
-        // Firebase write promise
-        const savePromise = addDoc(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'semesters'), {
-            name: semesterName, 
-            courses, 
-            createdAt: serverTimestamp()
-        });
-
-        // 10-second timeout promise
-        const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("Firebase save operation timed out after 10 seconds. Check your network or Firebase rules.")), 10000)
-        );
 
         try {
+            if (isOfflineMode) {
+                throw new Error("Offline Mode Active");
+            }
+
+            console.log("Saving to database");
+            console.log("appId =", appId);
+            console.log("uid =", currentUser.uid);
+
+            // Firebase write promise
+            const savePromise = addDoc(
+             collection(db, "users", currentUser.uid, "semesters"), {
+                name: semesterName,
+                courses,
+                createdAt: serverTimestamp()
+            });
+
+            // 10-second timeout promise
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("Firebase save operation timed out after 10 seconds. Check your network or Firebase rules.")), 10000)
+            );
+
             await Promise.race([savePromise, timeoutPromise]);
             console.log("Save successful");
         } catch (dbError) {
-            console.warn("Firebase save failed or timed out. Falling back to LocalStorage:", dbError);
-            
+            console.warn("Firebase save failed, timed out, or offline. Falling back to LocalStorage:", dbError);
+
             const tempId = "local_" + Date.now();
             const newSemester = {
                 id: tempId,
@@ -237,17 +279,17 @@ DOM.semesterForm.onsubmit = async (e) => {
             }
             console.log("Save successful");
         }
-        
+
         // Reset form & generate standard course slots
-        e.target.reset(); 
-        DOM.courseList.innerHTML = ''; 
-        [1,2,3].forEach(addCourseRow);
+        e.target.reset();
+        DOM.courseList.innerHTML = '';
+        [1, 2, 3].forEach(addCourseRow);
 
         // Success state indicator
         submitBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700', 'opacity-80', 'cursor-not-allowed');
         submitBtn.classList.add('bg-emerald-500', 'hover:bg-emerald-600');
         submitBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg> Saved Successfully!';
-        
+
         setTimeout(() => {
             submitBtn.disabled = false;
             submitBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
@@ -267,7 +309,7 @@ DOM.semesterForm.onsubmit = async (e) => {
 };
 
 // Initialize form template slots
-[1,2,3].forEach(addCourseRow);
+[1, 2, 3].forEach(addCourseRow);
 
 // ==========================================================================
 // 3. GPA Calculations & Business Logic
@@ -286,8 +328,8 @@ function calculateFuturePath(target, remaining) {
     // Feasibility Engine
     DOM.feasibilityBadge.className = 'inline-flex items-center px-3 py-1 rounded-full text-sm font-medium';
     if (requiredGPA <= 0) {
-         DOM.feasibilityBadge.textContent = "Already Achieved!";
-         DOM.feasibilityBadge.classList.add('bg-emerald-400', 'text-emerald-950');
+        DOM.feasibilityBadge.textContent = "Already Achieved!";
+        DOM.feasibilityBadge.classList.add('bg-emerald-400', 'text-emerald-950');
     } else if (requiredGPA <= 3.0) {
         DOM.feasibilityBadge.textContent = "Very Feasible";
         DOM.feasibilityBadge.classList.add('bg-emerald-400', 'text-emerald-950');
@@ -322,7 +364,7 @@ function updateUI() {
         });
         currentTotalPoints += sPoints;
         currentTotalCredits += sCredits;
-        const sGpa = sCredits ? (sPoints/sCredits) : 0;
+        const sGpa = sCredits ? (sPoints / sCredits) : 0;
         if (sGpa > bestSem.gpa) bestSem = { name: sem.name, gpa: sGpa };
     });
 
@@ -361,7 +403,7 @@ function renderHistory() {
     [...semestersData].reverse().forEach(sem => {
         let sPoints = 0, sCredits = 0;
         sem.courses.forEach(c => { sPoints += (c.credits * c.grade); sCredits += c.credits; });
-        const sGpa = sCredits ? (sPoints/sCredits).toFixed(2) : "0.00";
+        const sGpa = sCredits ? (sPoints / sCredits).toFixed(2) : "0.00";
 
         const el = document.createElement('div');
         el.className = "p-6 hover:bg-slate-50 transition flex justify-between items-center group";
@@ -384,9 +426,9 @@ function renderHistory() {
     list.querySelectorAll('.del-btn').forEach(b => b.onclick = (e) => {
         if (confirm('Delete this semester record?')) {
             const idToDelete = e.currentTarget.dataset.id;
-            
-            // Delete locally if it is an offline-only record
-            if (idToDelete.startsWith("local_")) {
+
+            // Delete locally if it is an offline-only record or in offline mode
+            if (idToDelete.startsWith("local_") || isOfflineMode) {
                 semestersData = semestersData.filter(s => s.id !== idToDelete);
                 try {
                     localStorage.setItem(`semesters_${currentUser.uid}`, JSON.stringify(semestersData));
@@ -397,16 +439,16 @@ function renderHistory() {
             } else {
                 // Delete from Firebase Firestore
                 deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'semesters', idToDelete))
-                .catch(err => {
-                    console.error("Firebase delete failed, removing locally:", err);
-                    semestersData = semestersData.filter(s => s.id !== idToDelete);
-                    try {
-                        localStorage.setItem(`semesters_${currentUser.uid}`, JSON.stringify(semestersData));
-                    } catch (lsErr) {
-                        console.error("Failed to update LocalStorage after deletion:", lsErr);
-                    }
-                    updateUI();
-                });
+                    .catch(err => {
+                        console.error("Firebase delete failed, removing locally:", err);
+                        semestersData = semestersData.filter(s => s.id !== idToDelete);
+                        try {
+                            localStorage.setItem(`semesters_${currentUser.uid}`, JSON.stringify(semestersData));
+                        } catch (lsErr) {
+                            console.error("Failed to update LocalStorage after deletion:", lsErr);
+                        }
+                        updateUI();
+                    });
             }
         }
     });
@@ -420,7 +462,7 @@ function renderChart() {
     const ctx = DOM.trendChartCanvas.getContext('2d');
     const labels = semestersData.map(s => s.name);
     const data = semestersData.map(s => {
-        let p = 0, c = 0; 
+        let p = 0, c = 0;
         s.courses.forEach(cr => { p += cr.credits * cr.grade; c += cr.credits; });
         return c ? (p / c).toFixed(2) : 0;
     });
@@ -428,31 +470,31 @@ function renderChart() {
     if (trendChartInstance) {
         trendChartInstance.destroy();
     }
-    
+
     trendChartInstance = new Chart(ctx, {
         type: 'line',
-        data: { 
-            labels, 
-            datasets: [{ 
-                data, 
-                borderColor: '#6366f1', 
-                backgroundColor: 'rgba(99, 102, 241, 0.1)', 
-                tension: 0.3, 
-                fill: true, 
-                pointRadius: 6, 
-                pointHoverRadius: 8, 
-                pointBackgroundColor: '#6366f1', 
-                borderWidth: 3 
-            }] 
+        data: {
+            labels,
+            datasets: [{
+                data,
+                borderColor: '#6366f1',
+                backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                tension: 0.3,
+                fill: true,
+                pointRadius: 6,
+                pointHoverRadius: 8,
+                pointBackgroundColor: '#6366f1',
+                borderWidth: 3
+            }]
         },
-        options: { 
-            responsive: true, 
-            maintainAspectRatio: false, 
-            scales: { 
-                y: { min: 0, max: 4.0, grid: { display: true, color: '#f1f5f9' } }, 
-                x: { grid: { display: false } } 
-            }, 
-            plugins: { legend: { display: false } } 
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: { min: 0, max: 4.0, grid: { display: true, color: '#f1f5f9' } },
+                x: { grid: { display: false } }
+            },
+            plugins: { legend: { display: false } }
         }
     });
 }
